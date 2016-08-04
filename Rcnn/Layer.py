@@ -10,7 +10,7 @@ from abc import abstractmethod
 from theano import tensor as T
 from theano.tensor.nnet import conv2d
 from theano.tensor.signal import pool
-from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from theano.tensor.shared_randomstreams import RandomStreams
 from theano import sandbox
 class Layer(object):
     def __init__(self):
@@ -46,7 +46,7 @@ class RCnn_Layer(Layer):
         mu = 0
         sigma = 1
         #scale_b = 3
-        shape = (self.nb_filter, self.input_shape[1],self.nb_row,self.nb_col)#(output channels, input channels, filter rows , filter columns)
+        shape = (self.nb_filter, self.input_shape[1], self.nb_row, self.nb_col)#(output channels, input channels, filter rows , filter columns)
         self.Cnn_W = theano.shared(np.random.normal(mu, sigma, size = shape).astype(np.float32), borrow=True)#(output channels, input channels, filter rows , filter columns).
         self.Cnn_B = theano.shared(np.zeros(self.nb_filter).astype(np.float32), borrow=True)#(output channels,).
         #self.Rnn_W_s = theano.shared( np.random.uniform(low = 0, high = 1 , size=(self.nb_filter)).astype(np.float32))#先设置为一个值,之前的状态,对应每个feature map
@@ -64,7 +64,7 @@ class RCnn_Layer(Layer):
             retain_prob = 1. - self.dropout_rate
             self.input *= rng.binomial(self.input.shape, p=retain_prob, dtype=self.input.dtype)
             self.input /= retain_prob
-        conv_out = conv2d(self.input,self.Cnn_W) #(batch size, output channels, output rows, output columns)
+        conv_out = conv2d(self.input, self.Cnn_W) #(batch size, output channels, output rows, output columns)
         conv_out = conv_out + self.Cnn_B.dimshuffle('x', 0, 'x', 'x')
         # out_put_shape = self.get_output_shape()
         # r_matrix_s = np.eye(out_put_shape[3], out_put_shape[3], 0)
@@ -175,7 +175,7 @@ class Flatten_Layer(Layer):
         return None
 
 class Dense_Layer(Layer):
-    def __init__(self,output_dim):
+    def __init__(self, output_dim):
         self.output_dim = output_dim
         self.activation = T.nnet.relu
         pass
@@ -184,17 +184,18 @@ class Dense_Layer(Layer):
         self.input_shape = input_shape
         assert len(input_shape) == 2
         input_dim = input_shape[1]
-        mu = (self.output_dim+0.0) / input_dim
-        sigma = 0.01
-        self.w = theano.shared(np.random.uniform(mu, sigma, size=(input_dim,)).astype(np.float32), borrow=True)
+        mu = 0
+        sigma = 0.1
+        self.w = theano.shared(np.random.normal(mu, sigma, size=(input_dim, self.output_dim)).astype(np.float32), borrow=True)
         self.b = theano.shared(np.zeros(self.output_dim).astype(np.float32), borrow=True)
 
     def set_input(self,input):
         self.input = input
 
     def get_output(self):
-        w_mask = T.zeros([self.input_shape[1], self.output_dim])
-        output = T.dot(self.input, w_mask+self.w.dimshuffle(0, 'x'))
+        #w_mask = T.zeros([self.input_shape[1], self.output_dim])
+        #output = T.dot(self.input, w_mask+self.w.dimshuffle(0, 'x'))
+        output = T.dot(self.input, self.w)
         output += self.b
         return self.activation(output)
 
@@ -232,6 +233,7 @@ class LSTM_Layer(Layer):
             x_t = X[:, t]
         else:
             x_t = X[:, t:t+1]
+        x_t = x_t/(1.0+(T.max(x_t)-T.min(x_t)))
         #x_t = X[:,t+self.input_shape[1]-self.hidden_dim+1:t+self.input_shape[1]+1]
         #x_t = x_t*self.E
         #test = T.dot(x_t, self.U)
@@ -267,7 +269,7 @@ class LSTM_Layer(Layer):
     def get_output(self):
         #X = T.concatenate([self.input, self.input], axis = 1)#!!!!这里修改了LSTM的原理
         X = self.input
-        [o,s,c],upd = theano.scan(self.step,sequences=[T.arange(self.input_shape[1])],
+        [o, s, c],upd = theano.scan(self.step,sequences=[T.arange(self.input_shape[1])],
                                   outputs_info = [None,dict(initial = T.zeros((self.input.shape[0], self.hidden_dim), "float32")), dict(initial = T.zeros((self.input.shape[0], self.hidden_dim), "float32"))]
                                   , non_sequences = [X])
         o = o.dimshuffle(1, 0, 2)
@@ -299,15 +301,15 @@ class CTC_Layer(Layer):#需要处理成三维的（batchsize,Vector）->(batchsi
             self.S_W = theano.shared(
                 np.random.normal(mu, sigma, (self.input_shape[2], self.word_kind)).astype(
                     np.float32), borrow=True)
-        self.S_C = theano.shared(np.random.normal(mu, sigma, (self.word_kind)).astype(np.float32), borrow=True)
-    
+        self.S_C = theano.shared(np.zeros((self.word_kind, )).astype(np.float32), borrow=True)
+
     def set_input(self,input):
         self.input = input
-        
+
     def CTC_reshape(self,Vector):
         con_Vector = Vector[self.vector_len-self.add_len:]
         con_Vector = T.zeros_like(con_Vector)
-        X_Vector = T.concatenate([con_Vector,Vector])
+        X_Vector = T.concatenate([con_Vector, Vector])
         def mini_reshape(index,X):
             real_index = T.cast((index*self.fstep+0.5),'int32')
             res = X[real_index+self.add_len+1-self.data_len:real_index+self.add_len+1]
@@ -316,20 +318,21 @@ class CTC_Layer(Layer):#需要处理成三维的（batchsize,Vector）->(batchsi
             return res_softmax
         res,upd = theano.scan(mini_reshape,sequences=[T.arange(self.word_len)],non_sequences = [X_Vector])
         return res
-    
+
     def get_output(self):
         if len(self.input_shape) == 2:
-            output, _ = theano.scan(self.CTC_reshape, sequences=[self.input])#self.input->(batch_size, T_len)
+            output, _ = theano.scan(self.CTC_reshape, sequences=[T.sin(self.input)])#self.input->(batch_size, T_len)
         else:
-            output, _ = theano.scan(lambda x, w, c: T.nnet.softmax(T.dot(x, w)+c), sequences=[self.input],
-                                 non_sequences=[self.S_W, self.S_C])
+            output, _ = theano.scan(lambda x: T.nnet.softmax(x), sequences=[self.input])
+            #output, _ = theano.scan(lambda x, w, c: T.nnet.softmax(T.dot(x, w)+c), sequences=[self.input],
+                                 # non_sequences=[self.S_W, self.S_C])
             #output = T.nnet.softmax(T.dot(self.input, self.S_W)+self.S_C)#self.input->(batch_size, T_len, hidden_dim)
         return output
     def get_output_shape(self):
         return (self.input_shape[0],self.word_len, self.word_kind)
        
     def get_train_data(self):
-        return [self.S_W,self.S_C]
+        return None
     
     
 class SequenceNNs():
@@ -346,7 +349,10 @@ class SequenceNNs():
         
     def add(self,newLayer):
         self.model.append(newLayer)
-        
+    def set_value(self, X, Y):
+        self.X = X
+        self.Y = Y
+
     def bulid(self,input_shape):
         temp_input = input_shape
         for NN in self.model:
@@ -446,7 +452,7 @@ class SequenceNNs():
         inpts = self.Y
         def each_loss(outpt, inpt):
             # y 是填充了blank之后的ans
-            blank = 0
+            blank = 26
             y_nblank = T.neq(inpt, blank)
             n = T.dot(y_nblank, y_nblank)  # 真实的字符长度
             N = 2 * n + 1  # 填充后的字符长度，去除尾部多余的填充
@@ -461,22 +467,28 @@ class SequenceNNs():
             pred_y = outpt[:, labels]
 
             fwd_pbblts, _ = theano.scan(
-                lambda curr, accum: curr * T.dot(accum, recurrence_relation),
+                lambda curr, accum: T.switch(T.eq(curr*T.dot(accum, recurrence_relation), 0.0),
+                                             T.dot(accum, recurrence_relation)
+                                             , curr*T.dot(accum, recurrence_relation)),
                 sequences=[pred_y],
                 outputs_info=[T.eye(N)[0]]
             )
+            #return fwd_pbblts
+            #liklihood = fwd_pbblts[0, 0]
             liklihood = fwd_pbblts[-1, -1] + fwd_pbblts[-1, -2]
-            liklihood = T.switch(T.lt(liklihood, 1e-32), 1e-32, liklihood)
-            loss = -T.log(liklihood)
+            #liklihood = T.switch(T.lt(liklihood, 1e-35), 1e-35, liklihood)
+            #loss = -T.log(T.cast(liklihood, "float32"))
+            #loss = 10 * (liklihood - 1) * (liklihood - 100)
+            loss = (T.le(liklihood, 1.0)*(10*(liklihood-1)*(liklihood-100)))+(T.gt(liklihood, 1.0)*(-T.log(T.cast(liklihood, "float32"))))
             return loss
-            # return N
+            #return pred_y
 
         ctc_losss, _ = theano.scan(each_loss,
                                    sequences=[outpts, inpts],
                                    )
         self.ctc_loss = theano.function([self.X, self.Y], ctc_losss)
+
         return ctc_losss
-    
     def CTC_train(self):
         CTC_LOSSs = T.cast(T.mean(self.CTC_LOSS(), axis=0), "float32")
         train_data_d = []
@@ -484,14 +496,17 @@ class SequenceNNs():
         train_data_m_s = [] 
         learning_rate = T.scalar()
         decay = T.scalar()
+        seed = np.random.randint(10e6)
+        rng = RandomStreams(seed=seed)
+        grad_rate = 0.8
         for data in self.train_data:
-            data_d = T.grad(CTC_LOSSs, data)
+            data_d = rng.binomial((1,), p=grad_rate, dtype="float32")[0]*T.grad(CTC_LOSSs, data)
             train_data_d.append(data_d)
             data_m_s = theano.shared(np.zeros(data.get_value().shape).astype(np.float32))
             train_data_m_s.append(data_m_s)
             data_m = data_m_s*decay + (1-decay)*data_d**2
             train_data_m.append(data_m)
-            
+        #self.grad_test = theano.function([self.X, self.Y], train_data_d[-4])
         #self.data_d_print = theano.function([self.X,self.Y],train_data_d[0][0])
         #upd = [(d,d-learning_rate*d_d)for d,d_d in zip(self.train_data,train_data_d)]
         upd = [(d, d-learning_rate*d_d/T.sqrt(d_m+1e-4))for d,d_d,d_m in zip(self.train_data,train_data_d,train_data_m)]
@@ -500,12 +515,12 @@ class SequenceNNs():
         #self.test = theano.function([self.X,self.Y],train_data_d[0])
         self.sgd_train = theano.function([self.X, self.Y, learning_rate, decay],
                                          [],
-                                         updates=upd
+                                         updates = upd
                                          )
-    
+
     def general_train(self):
         loss = T.sum((self.output - self.Y)**2,axis = 1)
-        loss = T.mean(loss,axis = 0)
+        loss = T.mean(loss, axis = 0)
         self.get_loss = theano.function([self.X,self.Y],loss)
         self.compare_print = theano.function([self.X,self.Y],[self.output[0][:5],self.Y[0][:5],self.X[0][:5]])  
         train_data_d = []
